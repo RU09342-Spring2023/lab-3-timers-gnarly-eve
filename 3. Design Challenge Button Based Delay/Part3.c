@@ -14,109 +14,102 @@
 
 #include <msp430.h>
 
+int buttonPressDuration = 0;
 
-#define ARMED_STATE 0
-#define WARNING_STATE 1
-#define ALERT_STATE 2
+void gpioInit();
+void timerInit();
 
+void main() {
+    WDTCTL = WDTPW | WDTHOLD;               // Stop watchdog timer
 
-int main() {
-    WDTCTL = WDTPW | WDTHOLD;             // Stop watchdog timer
+    gpioInit();
+    timerInit();
 
-    // Initialization:
-    P6OUT &= ~BIT6;                       // Clear P6.6 output latch for a defined power-on state
-    P6DIR |= BIT6;                        // Set P6.6 to output direction
+    PM5CTL0 &= ~LOCKLPM5;
 
-    P1OUT &= ~BIT0;                       // Clear P1.0 output latch for a defined power-on state
-    P1DIR |= BIT0;                        // Set P1.0 to output direction
-
-    P2DIR &= ~BIT3;                       // Configure Pin 2.3 to an input
-    P2REN |= BIT3;                        // Enable the pull up/down resistor for Pin 2.3
-    P2OUT |= BIT3;                        // While configured as an input, P4OUT controls whether
-                                          // the resistor is a pull up or pull down
-
-    P4DIR &= ~BIT1;                       // Configure Pin 4.1 to an input
-    P4REN |= BIT1;                        // Enable the pull up/down resistor for Pin 4.1
-    P4OUT |= BIT1;                        // While configured as an input, P4OUT controls whether
-                                          // the resistor is a pull up or pull down
-
-
-    char state = 0;                       // Initialize state to Armed State
-    int count = 0;                        // Initialize counter to 0
-
-    PM5CTL0 &= ~LOCKLPM5;                 // Disable the GPIO power-on default high-impedance mode
-                                          // to activate previously configured port settings
-
-    // Prototypes:
-    void delay(int ms);
-    void blinkGreenLED();
-    void blinkRedLED();
-
-
-    while(1)
-    {
-      switch (state) {
-        case 0:                           // Armed State
-            (P1OUT &= BIT0) == 0;         // Toggle off P1.0
-            if (!(P2IN & BIT3)) {         // If P2.3 pressed, go to Warning State
-               state = 1;
-               break;
-            }
-            else {
-                blinkGreenLED();          // If P2.3 not pressed, blink Green LED
-                break;
-            }
-        case 1:                           // Warning State
-            P6OUT &= ~BIT6;               // Toggle off P6.6
-            if (P2IN & BIT3) {            // If P2.3 let go, reset counter and go to Armed State
-                count = 0;
-                state = 0;
-                break;
-            }
-            else if (count >= 10) {       // If P2.3 held down for more than
-                state = 2;                // 10 (seconds from blink Red LED), go to Alert State
-                break;
-            }
-            else {                        // If P2.3 still held down, blink Red LED and increment counter
-                blinkRedLED();
-                count++;
-                break;
-            }
-        case 2:                           // Alert State
-            P1OUT |= BIT0;                // Toggle on Red LED
-            if (!(P4IN & BIT1)) {         // If P4.1 pressed, toggle off Red LED, reset counter,
-                P1OUT &= ~BIT0;           // and go to Armed State
-                count = 0;
-                state = 0;
-                break;
-            }
-       }
-     }
+   __bis_SR_register(LPM3_bits | GIE);
 }
 
 
-// Definitions:
-void delay(int ms) {                      // Function to convert microseconds to milliseconds
-    int i;
-    for (i = 0; i < ms; i++) {
-        __delay_cycles(1000);             // Delay for 1000000us = 1000ms
-    }
+void gpioInit() {
+
+    P1DIR |= BIT0;                          // Set P1.0 to output direction
+    P1OUT &= ~BIT0;                         // Clear P1.0 output latch for a defined power-on state
+
+    P2DIR &= ~BIT3;
+    P2REN |= BIT3;                          // Enable the pull up/down resistor for Pin 2.3
+    P2OUT |= BIT3;                          // Pull-up resistor
+    P2IES |= BIT3;                          // P2.3 High --> Low edge
+    P2IFG &= ~BIT3;
+    P2IE |= BIT3;                           // P2.3 interrupt enabled
+
+    P4DIR &= ~BIT1;                         // Config P4.1 as input
+    P4REN |= BIT1;                          // Enable the pull up/down resistor for Pin 4.1
+    P4OUT |= BIT1;                          // Pull-up resistor
+    P4IES |= BIT1;                          // P4.1 High --> Low edge
+    P4IFG &= ~BIT1;                         // Clear P4.1 IRQ Flag
+    P4IE |= BIT1;                           // P4.1 interrupt enabled
 }
 
-void blinkGreenLED() {                    // Function to blink Green LED once every 3s
-    P6OUT ^= BIT6;                        // Toggle off P6.6
-    delay(1500);                          // Delay for 1.5s
-    P6OUT ^= BIT6;                        // Toggle on P6.6
-    delay(1500);                          // Delay for 1.5s
+
+void timerInit() {
+    TB1CCR0 = 300;  //arbitrary initial value
+    TB1CTL |= TBSSEL__ACLK + MC_0 + TBCLR; // Set the clock source to ACLK, stop the timer, and clear it
+    TB1CCTL0 |= CAP + CM_3; // Set Timer B0 to capture mode, set for both edges
+
+    TB0CTL |= TBCLR;                    // Clear timer and dividers
+    TB0CTL |= TBSSEL__ACLK;             // Source = ACLK
+    TB0CTL |= MC__UP;                   // Mode = UP;
+    TB0CCR0 = 8192;                     // Timer up to 4 Hz
+    TB0CCTL0 |= CCIE;                   // Enable TB0 CCR0 Overflow IRQ
+    TB0CCTL0 &= ~CCIFG;                 // Clear CCR0 Flag
 }
 
-void blinkRedLED() {                      // Function to blink RED LED once every 1s
-    P1OUT ^= BIT0;                        // Toggle off P1.0
-    delay(500);                           // Delay for 0.5s
-    P1OUT ^= BIT0;                        // Toggle off P1.0
-    delay(500);                           // Delay for 0.5s
+
+/*
+ * INTERRUPT ROUTINES
+ */
+
+
+// Port 2 interrupt service routine
+#pragma vector=PORT2_VECTOR
+__interrupt void ISR_Port2_S2(void)
+{
+   if (P2IES & BIT3) {
+       TB1CTL |= MC_2;
+       P2IES &= ~BIT3;
+   }
+
+   else if (P2IES != BIT3) {
+       TB1CTL &= ~(MC0 + MC1); //stop timer B0 to record how long the button was pressed
+
+       //Put timer B0 value into the max timer B1 CCR0
+       buttonPressDuration = TB1R; // Record the button press time
+       TB0CCR0 = buttonPressDuration; // Set the max count for Timer B1 to the button press time
+
+       TB1CTL |= TBCLR; //clear timer B0 for next button press
+       P2IES |= BIT3;
+   }
+   P2IFG &= ~BIT3;         // Clear interrupt flag for P2.3
 }
 
 
 
+// Port 4 interrupt service routine
+#pragma vector=PORT4_VECTOR
+__interrupt void ISR_Port4_S1(void)
+{
+    TB1CTL &= ~(MC0 + MC1); // Stop Timer B0 - just in case
+    TB1CTL |= TBCLR; // Clear Timer B0
+    TB0CCR0 = 8192;
+    P4IFG &= ~BIT1;
+}
 
+
+// Timer B0 interrupt service routine
+#pragma vector = TIMER0_B0_VECTOR
+__interrupt void ISR_TB0_CCR0(void)
+{
+    P1OUT ^= BIT0;                  // Toggle Red LED
+    TB0CCTL0 &= ~CCIFG;             // Clear CCR0 flag
+}
